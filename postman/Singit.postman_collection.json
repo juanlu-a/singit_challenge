@@ -1,0 +1,105 @@
+{
+  "info": {
+    "name": "Singit — Vocabulary Practice API",
+    "description": "Practice layer on top of word insights. Base URL and ids are collection variables. A successful 'Create Practice Session' response auto-captures sessionId + the first exerciseId via a test script.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:3000" },
+    { "key": "userId", "value": "user_001" },
+    { "key": "sessionId", "value": "" },
+    { "key": "exerciseId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Import Word Insights",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/word-insights/import",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"wordInsights\": [\n    {\n      \"id\": \"insight_001\",\n      \"word\": \"darling\",\n      \"normalizedWord\": \"darling\",\n      \"language\": \"en\",\n      \"translations\": [{ \"language\": \"es\", \"text\": \"cariño\" }, { \"language\": \"pt\", \"text\": \"querido\" }],\n      \"difficulty\": 2,\n      \"frequency\": 12,\n      \"source\": \"song\",\n      \"songRefs\": [{ \"songId\": \"song_001\", \"title\": \"Example Song\", \"occurrences\": 1 }],\n      \"imageRefs\": [{ \"id\": \"image_darling_001\", \"url\": \"https://example.com/images/darling.png\" }]\n    }\n  ]\n}"
+        }
+      }
+    },
+    {
+      "name": "Get Word Insights",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/word-insights?language=en&limit=20&offset=0"
+      }
+    },
+    {
+      "name": "Get User Word Insights",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/users/{{userId}}/word-insights?limit=20"
+      }
+    },
+    {
+      "name": "Update User Vocabulary",
+      "request": {
+        "method": "PUT",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/users/{{userId}}/vocabulary/insight_001",
+        "body": { "mode": "raw", "raw": "{\n  \"status\": \"learning\"\n}" }
+      }
+    },
+    {
+      "name": "Get User Insight Summary",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/users/{{userId}}/insight-summary"
+      }
+    },
+    {
+      "name": "Create Practice Session",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const body = pm.response.json();",
+              "if (body.sessionId) { pm.collectionVariables.set('sessionId', body.sessionId); }",
+              "if (body.exercises && body.exercises.length) { pm.collectionVariables.set('exerciseId', body.exercises[0].exerciseId); }"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/users/{{userId}}/practice-sessions",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"limit\": 5,\n  \"sourceLanguage\": \"en\",\n  \"translationLanguage\": \"es\",\n  \"statuses\": [\"unknown\", \"learning\"],\n  \"exerciseTypes\": [\"word_meaning\", \"reverse_translation\", \"word_to_image\"]\n}"
+        }
+      }
+    },
+    {
+      "name": "Get Practice Session (answers hidden)",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/practice-sessions/{{sessionId}}"
+      }
+    },
+    {
+      "name": "Submit Exercise Attempt",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{base_url}}/practice-sessions/{{sessionId}}/exercises/{{exerciseId}}/attempts",
+        "body": { "mode": "raw", "raw": "{\n  \"answer\": \"opt_0\"\n}" }
+      }
+    },
+    {
+      "name": "Get Practice Session Results",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/practice-sessions/{{sessionId}}/results"
+      }
+    }
+  ]
+}
