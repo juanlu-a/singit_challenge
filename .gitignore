@@ -1,0 +1,19 @@
+# dependencies
+/node_modules
+
+# build
+/dist
+*.tsbuildinfo
+
+# test
+/coverage
+
+# env
+.env
+.env.local
+
+# editor / OS
+.DS_Store
+*.log
+.idea
+.vscode
