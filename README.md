@@ -1,171 +1,206 @@
 # Singit — Backend Challenge
 
-English-learning-through-music backend challenge. Two parts:
+This is my solution to the Singit backend challenge: the backend for an app that helps people learn
+English through music. The challenge has two parts, and this repo contains both.
 
-- **Part 1 — Architecture Principles** (written): [`docs/PART1-ARCHITECTURE.md`](docs/PART1-ARCHITECTURE.md).
-  Designs the full system (songs, synchronized lyrics, word indexing, translations, insight
-  generation, user vocabulary, difficulty scoring) with diagrams, DTOs and trade-offs.
-- **Part 2 — Backend Development** (this repo): a **practice layer** built on top of word insights.
-  Insights are assumed to already exist (no lyrics parsing). Implemented with **NestJS + TypeScript +
-  Mongoose + MongoDB**.
+- **Part 1 — Architecture (writing only):** [`docs/PART1-ARCHITECTURE.md`](docs/PART1-ARCHITECTURE.md).
+  How I'd design the *full* system — songs with synced lyrics, splitting lyrics into searchable words,
+  translations, building the word "insights", user vocabulary, and difficulty scoring — with diagrams
+  and the trade-offs behind each choice.
+- **Part 2 — The code (this repo):** the **practice layer** that sits on top of those word insights.
+  It assumes the insights already exist (so there's no lyrics parsing here) and focuses on helping a
+  user actually practice and learn words. Built with **NestJS, TypeScript, Mongoose and MongoDB**.
+
+### The idea in one paragraph
+
+A *word insight* is just "a word worth learning" plus everything we know about it: its translations,
+how hard it is, how often it shows up in songs, example sentences, maybe an image. The app keeps one
+shared catalog of these insights. On top of that, each user has their own *vocabulary state* — which
+words they already know, are still learning, or want to ignore. This backend takes those two things
+and does the practice loop: it decides **which words a user should practice next**, **builds
+exercises** from the insights (multiple choice, etc.), **records the answers**, and **updates what the
+user knows** based on how they did.
 
 ---
 
-## Quick start
+## Running it
 
-### Option A — Docker Compose (app + MongoDB)
+### Option A — everything in Docker (app + MongoDB)
 
 ```bash
-docker compose up --build        # starts MongoDB + the API on :3000
-# in another terminal, load the example dataset:
+docker compose up --build        # MongoDB + the API on http://localhost:3000
+# then, in another terminal, load the example data:
 docker compose exec app npm run seed
 ```
 
-### Option B — Local Node, Docker only for MongoDB
+### Option B — Node locally, Docker just for MongoDB
 
 ```bash
 cp .env.example .env
-docker compose up -d mongo       # just MongoDB on :27017
+docker compose up -d mongo       # only MongoDB, on :27017
 npm install
-npm run seed                     # load the example dataset
-npm run start:dev                # API on :3000 (watch mode)
+npm run seed                     # load the example data
+npm run start:dev                # API on :3000 (auto-reload)
 ```
 
-Then open **Swagger UI at <http://localhost:3000/docs>** to explore and exercise every endpoint, or
-import [`postman/Singit.postman_collection.json`](postman/Singit.postman_collection.json) into Postman.
+Once it's up, the easiest way to play with it is **Swagger at <http://localhost:3000/docs>** — every
+endpoint is documented and you can call it right there. There's also a Postman collection at
+[`postman/Singit.postman_collection.json`](postman/Singit.postman_collection.json) if you prefer that
+(it auto-fills the session and exercise ids for you after you create a session).
 
 ### Tests
 
 ```bash
-npm test            # unit tests (prioritization, exercise generation, attempt rule)
-npm run test:e2e    # full HTTP flow against an in-memory MongoDB (mongodb-memory-server)
+npm test            # unit tests: prioritization, exercise generation, the attempt rule
+npm run test:e2e    # full flow over HTTP against a real (in-memory) MongoDB
 ```
 
+The e2e suite spins up a real MongoDB in memory (via `mongodb-memory-server`), so it exercises the
+actual database, not mocks.
+
 ---
 
-## What it does (operations)
+## What the API does
 
-| Operation | Endpoint |
+Nine endpoints, grouped by what they're for. A good order to try them is the **demo flow** at the
+bottom of this section.
+
+| What you want to do | Endpoint |
 |---|---|
-| Import / upsert word insights | `POST /word-insights/import` |
-| List global insights (filters + pagination) | `GET /word-insights` |
-| Get user word insights (state + stats + priority) | `GET /users/:userId/word-insights` |
-| Update user vocabulary status | `PUT /users/:userId/vocabulary/:wordInsightId` |
-| Get user insight summary | `GET /users/:userId/insight-summary` |
-| Create practice session (generated exercises) | `POST /users/:userId/practice-sessions` |
-| Get practice session (answers hidden) | `GET /practice-sessions/:sessionId` |
-| Submit exercise attempt | `POST /practice-sessions/:sessionId/exercises/:exerciseId/attempts` |
-| Get practice session results | `GET /practice-sessions/:sessionId/results` |
+| Load / update the word insights catalog | `POST /word-insights/import` |
+| Browse the catalog (filter + paginate) | `GET /word-insights` |
+| See a user's words *with* their state, stats and priority | `GET /users/:userId/word-insights` |
+| Manually change a word's status for a user | `PUT /users/:userId/vocabulary/:wordInsightId` |
+| Get a user's overall summary | `GET /users/:userId/insight-summary` |
+| Start a practice session (generates exercises) | `POST /users/:userId/practice-sessions` |
+| Look at a session (answers hidden) | `GET /practice-sessions/:sessionId` |
+| Answer one exercise | `POST /practice-sessions/:sessionId/exercises/:exerciseId/attempts` |
+| See how a session went | `GET /practice-sessions/:sessionId/results` |
 
-A typical demo flow: **seed → `GET /users/user_001/word-insights` → `POST .../practice-sessions` →
-submit attempts → `GET .../results` → `GET .../insight-summary`.**
+**Demo flow:** `seed` → `GET /users/user_001/word-insights` (see the ranked words) →
+`POST .../practice-sessions` (get exercises) → answer a few attempts → `GET .../results` and
+`GET .../insight-summary` (watch the user's state update).
 
 ---
 
-## Architecture
+## How the code is organized
 
-Three modules with clear collection boundaries (global catalog vs. per-user state vs. practice
-activity):
+Three feature modules, each owning its own collection. The split mirrors the three different kinds of
+data: the **shared catalog**, the **per-user state**, and the **practice activity**.
 
 ```
 src/
-  common/            enums, pagination DTO, exception filter, normalize + seeded-random utils
-  config/            env configuration
-  database/          Mongoose connection
+  common/            shared bits: enums, pagination, error handling, the normalize + seeded-random helpers
+  config/            reads PORT and the Mongo URI from the environment
+  database/          the Mongoose connection
   modules/
-    word-insights/   global insight catalog: import (upsert) + filtered listing
-    user-vocabulary/ per-user state, prioritization, get-user-word-insights, summary
-    practice/        sessions, deterministic exercise generation, attempts, results
-  seed/              example dataset + idempotent seed script
+    word-insights/   the shared catalog — import (upsert) and browsing
+    user-vocabulary/ per-user state, the prioritization logic, the user views and summary
+    practice/        sessions, exercise generation, attempts, and results
+  seed/              the example dataset + a script to load it
 ```
 
-### Collections & key indexes
+### The four collections
 
-| Collection | Purpose | Key indexes |
+| Collection | What it holds | Important indexes |
 |---|---|---|
-| `word_insights` | global, shared catalog | unique `(normalizedWord, language)`, unique `externalId`, `(language, source, difficulty)` |
-| `user_vocabulary` | per-user knowledge state | unique `(userId, wordInsightId)`, `(userId, status)` |
-| `practice_sessions` | sessions with embedded exercises | `(userId, createdAt)` |
-| `exercise_attempts` | recorded answers | `(sessionId)`, `(userId, wordInsightId, createdAt)` |
+| `word_insights` | the shared, global catalog of words | unique `(normalizedWord, language)`, unique `externalId`, `(language, source, difficulty)` |
+| `user_vocabulary` | what each user knows, per word | unique `(userId, wordInsightId)`, `(userId, status)` |
+| `practice_sessions` | a session with its exercises inside it | `(userId, createdAt)` |
+| `exercise_attempts` | every answer a user submitted | `(sessionId)`, `(userId, wordInsightId, createdAt)` |
 
-`user_vocabulary.wordInsightId` references `word_insights.externalId` (the stable, human-readable id
-such as `insight_002`) so the dataset, vocabulary and attempts all line up on one key.
+The link between a user's vocabulary and the catalog is `word_insights.externalId` — a stable,
+readable id like `insight_002`. Using that everywhere means the dataset, a user's vocabulary, and
+their attempts all line up on the same key.
 
 ---
 
-## Documented design decisions
+## The rules, explained
 
-These are the rules the challenge asks to be explicit and deterministic.
+The challenge asks for a few things to be **deterministic** — meaning the same input always gives the
+same output, with no randomness leaking in. That makes them predictable and easy to test, which is
+exactly why each one below lives in its own small, pure function.
 
-### Prioritization (which words to practice first)
+### Which words to practice first (prioritization)
 
-`src/modules/user-vocabulary/prioritization.service.ts` — a pure, weighted score in `[0, 1]`:
+Lives in `src/modules/user-vocabulary/prioritization.service.ts`. Each word gets a score between 0
+and 1 — higher means "practice this sooner":
 
 ```
-priority = 0.5·statusWeight + 0.2·normFrequency + 0.2·normDifficulty + 0.1·recentIncorrectFlag
+priority = 0.5·status + 0.2·frequency + 0.2·difficulty + 0.1·recentlyWrong
 ```
 
-- `statusWeight`: `unknown = 1.0`, `learning = 0.7`, `known = 0.0`; `ignored` words are **excluded**
-  from practice entirely.
-- `normFrequency = min(frequency, 50) / 50`; `normDifficulty = (difficulty − 1) / 4` (difficulty 1–5).
-- Deterministic tie-break by `normalizedWord`.
-- A human `recommendationReason` is derived from the dominant factor (a recent mistake takes
-  precedence as the most actionable reason).
+In plain terms, a word gets pushed up if the user doesn't know it yet, if it shows up a lot in songs,
+if it's a harder word, or if they just got it wrong. The details:
 
-### Exercise generation (deterministic)
+- **status** — `unknown` counts full (1.0), `learning` counts less (0.7), `known` counts 0. Words the
+  user marked `ignored` are dropped from practice completely.
+- **frequency** — `min(frequency, 50) / 50`, so very common words don't run away with the score.
+- **difficulty** — `(difficulty − 1) / 4`, mapping the 1–5 scale onto 0–1.
+- Ties are broken alphabetically by the word, so the order is always stable.
+- Every word also comes back with a short, human `recommendationReason` ("New word you haven't
+  learned yet", "Recently answered incorrectly", …) taken from whatever factor mattered most.
 
-`src/modules/practice/exercise-generator.service.ts` — three types, generated from stored insights:
+### Generating exercises
 
-- `word_meaning` — choose the correct translation of a word.
-- `reverse_translation` — choose the source-language word for a translated meaning.
-- `word_to_image` — choose the image that represents a word.
+Lives in `src/modules/practice/exercise-generator.service.ts`. Exercises are built from the stored
+insights — nothing is hardcoded. Three types:
 
-Determinism comes from a small seeded PRNG (`common/util/seeded-random.ts`) seeded from a stable
-string, so option order and distractor selection are fully reproducible (covered by tests). **Guards:**
-translation exercises are only generated when the requested `translationLanguage` exists on the
-insight; image exercises only when there are enough images to build valid options. Words without
-enough data are reported in the session's `skipped[]` array — never answered with fabricated options.
-Each session rotates exercise types across words so a session mixes types.
+- `word_meaning` — pick the correct translation of a word.
+- `reverse_translation` — given a translation, pick the original word.
+- `word_to_image` — pick the image that matches a word.
 
-> Correct answers (`correctOptionId`) are **never** returned by the API for unanswered exercises —
-> they are stored server-side and revealed only in results after an attempt.
+To keep it deterministic, the "random" choices (which wrong answers to show, what order to put them
+in) come from a tiny seeded random generator (`common/util/seeded-random.ts`) seeded from a fixed
+string. Same word, same options, every time — which is what the tests rely on.
 
-### Attempt → vocabulary update rule
+It also refuses to make a bad question. Translation exercises are only created when the word actually
+has a translation in the language you asked for, and image exercises only when there are enough images
+to build real choices. If a word doesn't have enough data, it's listed in the session's `skipped[]`
+instead of being faked. A session also rotates through the exercise types so you get a mix.
 
-`UserVocabularyService.computeNextStatus` (pure, unit-tested):
+> One important detail: the correct answer (`correctOptionId`) is **never** sent back while an exercise
+> is still unanswered. It's kept on the server and only revealed in the results after you've answered.
 
-- **Correct** → `correctCount++`; the word becomes `known` once `correctCount >= 2`, otherwise
-  `learning`.
-- **Incorrect** → `incorrectCount++`; the word moves to `learning`.
-- `ignored` is preserved (the user opted out). `lastPracticedAt` and `lastAttemptCorrect` are always
-  updated; the latter feeds the "answered incorrectly recently" priority term.
+### What happens when you answer (the attempt rule)
 
-### Import semantics
+Lives in `UserVocabularyService.computeNextStatus`, kept as a pure function so it's trivial to test:
 
-`POST /word-insights/import` upserts by the natural key `(normalizedWord, language)` and returns a
-per-batch summary `{ created, updated, skipped, rejected[] }`. Invalid records are rejected
-individually (with index + reason) and never fail the whole batch; duplicates within one batch are
-skipped. `externalId` is stable across re-imports.
+- **Right answer** → the correct count goes up; the word becomes `known` after **two** correct
+  answers, otherwise it's `learning`.
+- **Wrong answer** → the incorrect count goes up and the word goes (back) to `learning`.
+- A word the user marked `ignored` stays `ignored`. We always update `lastPracticedAt` and remember
+  whether the last answer was right — that last bit feeds the "recently got it wrong" part of the
+  priority score.
 
----
+### Importing insights
 
-## Model enrichments (vs. the example DTOs)
-
-The brief invites challenging the example models; deviations:
-
-- Added a stable **`externalId`** distinct from Mongo's `_id` so dataset imports are idempotent and
-  cross-collection references stay readable.
-- **Difficulty** is constrained to `1..5` (validated); the priority score normalizes it.
-- Added **`correctCount` / `incorrectCount` / `lastPracticedAt` / `lastAttemptCorrect`** on user
-  vocabulary to drive the attempt rule and prioritization.
-- Practice sessions **embed** their exercises (a session is read/written as a unit); attempts are a
-  separate collection (append-only activity log).
-- Sessions record a **`skipped[]`** list for transparency when a word lacked data for an exercise.
+`POST /word-insights/import` upserts on the natural key `(normalizedWord, language)` and returns a
+summary: `{ created, updated, skipped, rejected[] }`. A bad record doesn't blow up the whole import —
+it's rejected on its own with the reason and its position, and the rest still go through. Duplicates
+inside the same request are skipped, and `externalId` stays the same across re-imports so importing
+the same file twice is safe.
 
 ---
 
-## Tech & assumptions
+## Where I tweaked the example models
+
+The brief explicitly invites challenging the example DTOs, so here's what I changed and why:
+
+- Added a stable **`externalId`** separate from Mongo's `_id`, so re-imports are idempotent and the
+  ids you see in one collection are readable references in another.
+- Constrained **`difficulty` to 1–5** (and validated it), since the priority score assumes that range.
+- Added **`correctCount`, `incorrectCount`, `lastPracticedAt` and `lastAttemptCorrect`** to a user's
+  vocabulary — these are what drive the attempt rule and the prioritization.
+- **Embedded the exercises inside the session** (a session is always read and written as one thing),
+  while keeping **attempts in their own collection** as an append-only log of what happened.
+- Gave a session a **`skipped[]`** list, so it's transparent when a word couldn't produce an exercise.
+
+---
+
+## Stack & assumptions
 
 - Node.js 22, NestJS 10, Mongoose 8, MongoDB 7.
-- No authentication/authorization (out of scope) — `userId` is taken from the route.
-- No real translation/NLP generation — insights arrive pre-computed (that pipeline is Part 1).
+- No auth — it's out of scope, so the `userId` just comes from the route.
+- No real translation or NLP here — the insights arrive already built. That whole pipeline is what
+  Part 1 describes.
