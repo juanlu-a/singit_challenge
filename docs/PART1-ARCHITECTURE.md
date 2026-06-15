@@ -1,40 +1,41 @@
 # Part 1 — Architecture Principles
 
-> Backend architecture for an **English-learning-through-music** product: songs with synchronized
-> lyrics, line/word translations, word-level learning insights, and per-user vocabulary state.
+> Backend architecture for an English-learning-through-music product: songs with synchronized
+> lyrics, line and word translations, word-level learning insights, and per-user vocabulary state.
 >
-> This document is **written-only** (no implementation). It is intentionally consistent with the
-> Part 2 implementation: the `WordInsight` and `UserVocabulary` entities described here are the same
-> ones realized in code in Part 2.
+> This is a written design, no implementation. I kept it aligned with Part 2 on purpose: the
+> `WordInsight` and `UserVocabulary` entities described here are the same ones I actually built in
+> Part 2.
 
 ---
 
 ## 1. Design goals & guiding principles
 
-The brief asks for a design that cleanly separates five concerns. I treat that separation as the
-backbone of the architecture, because each concern has a **different access pattern, write
-frequency, and ownership**:
+The brief asks for a design that clearly separates five concerns. I used that separation as the
+backbone of the whole thing, because each one behaves differently: they are written at different
+times, owned by different parts of the system, and read in different ways.
 
-| Concern | What it optimizes for | Write frequency | Owner |
+| Concern | What it optimizes for | Write frequency | Responsibility |
 |---|---|---|---|
-| Original lyric structure (display) | Faithful, ordered rendering with timings | Write-once on import | Catalog |
-| Searchable word representation | Fast word/occurrence lookup | Rebuilt on lyric change | Catalog (derived) |
-| Translation model (line + word) | Resolving text in the user's language | Async, incremental | Catalog (derived) |
-| User vocabulary state | Per-user knowledge tracking | High, per interaction | User |
-| Insight generation | Aggregating words into learnable units | Async, batch | Pipeline |
+| Original lyric structure (display) | Faithful, ordered rendering with timings | Once, on import | Catalog |
+| Searchable word representation | Fast word/occurrence lookup | Rebuilt when lyrics change | Catalog (generated) |
+| Translation model (line + word) | Showing text in the user's language | Incremental, async | Catalog (generated) |
+| User vocabulary state | Tracking what each user knows | High, every interaction | User |
+| Insight generation | Turning words into learnable units | Batch, async | Pipeline |
 
-**Core principle: separate the *write model* (faithful source-of-truth lyrics) from *read models*
-(denormalized, indexed projections).** Lyrics are imported once and read millions of times; we pay
-the cost at write time to make reads cheap and simple.
+The main idea behind the design is to keep the *write model* (the original lyrics, stored exactly as
+imported) separate from the *read models* (the indexed, pre-shaped data we actually query). A song is
+imported once but read constantly, so it pays off to do the heavy work at import time and keep reads
+simple.
 
-Two more principles drive every decision below:
+Two more ideas guide the rest of the document:
 
-- **Global catalog vs. per-user state are different collections with different lifecycles.** A song's
-  insights are shared by every user; only the `UserVocabulary` rows are user-owned. This keeps the
-  catalog cacheable/immutable and lets user writes scale independently.
-- **Derivable data is derived asynchronously and idempotently.** Word occurrences, insights, and
-  machine translations are all *projections* of the source lyrics. They can be rebuilt at any time, so
-  ingestion is a pipeline of idempotent steps rather than one big synchronous transaction.
+- **The shared catalog and the per-user state are different collections with different lifecycles.**
+  A song and its insights are the same for everyone; only the `UserVocabulary` rows belong to a
+  specific user. Splitting them keeps the catalog easy to cache and lets user writes grow on their own.
+- **Anything that can be re-derived is built asynchronously and idempotently.** Word occurrences,
+  insights and machine translations are all just projections of the original lyrics. Since they can be
+  rebuilt at any time, import is a chain of small, repeatable steps rather than one big transaction.
 
 ---
 
@@ -107,12 +108,13 @@ erDiagram
 
 ### 2.1 Original lyric structure — *display* (`Song`, `Artist`, `LyricLine`)
 
-The **source of truth**, stored exactly as received and never lossy. `LyricLine` preserves order
-(`lineIndex`), original `text`, and optional `startTimeMs`/`endTimeMs` for karaoke-style sync. This
-model alone answers *"display the lyrics in order"* with a single indexed range query.
+This is the source of truth. We store it exactly as it arrives and never throw anything away.
+`LyricLine` keeps the order (`lineIndex`), the original `text`, and optional
+`startTimeMs`/`endTimeMs` for karaoke-style highlighting. On its own this model already answers
+"display the lyrics in order" with one indexed range query.
 
 ```jsonc
-// LyricLine (write model — faithful to source)
+// LyricLine (write model — faithful to the source)
 {
   "songId": "song_001",
   "lineIndex": 0,
@@ -122,18 +124,21 @@ model alone answers *"display the lyrics in order"* with a single indexed range 
 }
 ```
 
-**What I keep / change / enrich vs. the example DTO:**
-- **Keep:** `songId`, `title`, `artist`, `language`, the ordered `lyrics[]` with `lineIndex` + timings.
-- **Change:** the inline `translation` on each line is *moved out* into its own `LineTranslation`
-  collection (see §4). A line can have 0..N translations; embedding only one language doesn't scale.
-- **Enrich:** add `metadata` (album, release year, ISRC) and a `revision` counter on the song so
-  derived projections know when to rebuild.
+What I keep, change or enrich compared to the example DTO:
+
+- **Keep:** `songId`, `title`, `artist`, `language`, and the ordered `lyrics[]` with `lineIndex` and
+  timings.
+- **Change:** the inline `translation` on each line moves out into its own `LineTranslation`
+  collection (see §4). A line can have any number of translations, so embedding a single language
+  doesn't hold up once you add more.
+- **Enrich:** add some `metadata` (album, release year, ISRC) and a `revision` counter on the song,
+  so the derived data knows when it needs to be rebuilt.
 
 ### 2.2 Searchable word representation — *queries* (`WordOccurrence`)
 
-A line of text is bad for querying ("find every place *love* appears"). So at import we **tokenize
-each line into one `WordOccurrence` document per word position**. This is the index that powers word
-search, occurrence queries, and frequency counts.
+Plain text is awkward to query: there's no clean way to ask "where does *love* appear?" against a
+string. So when a song is imported we split each line into words and store one `WordOccurrence` per
+word position. This is the index behind word search, occurrence lookups and frequency counts.
 
 ```jsonc
 // WordOccurrence (derived read model — one per word position)
@@ -149,15 +154,15 @@ search, occurrence queries, and frequency counts.
 }
 ```
 
-The pair `(normalizedWord, language)` is the **join key** to `WordInsight`. We deliberately do *not*
-store translations or difficulty here — those live on the shared insight, so a single edit to an
-insight is reflected across every occurrence.
+The pair `(normalizedWord, language)` is the link to `WordInsight`. We intentionally don't store
+translations or difficulty here. Those live on the shared insight, so editing one insight is
+reflected in every occurrence automatically.
 
 ### 2.3 Global word insights — *learning units* (`WordInsight`)
 
-Aggregated **once per `(normalizedWord, language)`** across the whole catalog. This is the entity
-Part 2 builds on. It carries everything needed to *learn/practice* a word: translations, difficulty,
-frequency, example sentences, and lightweight back-references to songs/images.
+Built once per `(normalizedWord, language)` across the whole catalog. This is the entity Part 2 is
+built on. It carries everything you need to learn or practice a word: translations, difficulty,
+frequency, example sentences, and light references back to the songs and images it came from.
 
 ```jsonc
 {
@@ -175,13 +180,13 @@ frequency, example sentences, and lightweight back-references to songs/images.
 }
 ```
 
-`songRefs` are intentionally **lightweight** (id + title + count) so the practice layer never needs
-full lyrics. This is exactly what lets Part 2 stand alone.
+`songRefs` are kept light on purpose (just id, title and a count), so the practice layer never has to
+touch full lyrics. That's exactly what lets Part 2 stand on its own.
 
 ### 2.4 User vocabulary state — *per-user* (`UserVocabulary`)
 
-Stored **separately** from the catalog, one row per `(userId, wordInsightId)`. It answers *"does this
-user already know this word?"* and accumulates practice stats.
+Stored separately from the catalog, one row per `(userId, wordInsightId)`. It answers "does this user
+already know this word?" and keeps the practice stats.
 
 ```jsonc
 {
@@ -196,13 +201,16 @@ user already know this word?"* and accumulates practice stats.
 }
 ```
 
-Keeping this in its own collection means: the catalog stays immutable & cacheable; user writes (the
-hot path) don't contend with catalog reads; and a user's data can be exported/deleted independently
-(GDPR-friendly).
+Keeping this in its own collection has three nice effects: the catalog stays immutable and cacheable,
+user writes (the busy path) don't compete with catalog reads, and a single user's data can be
+exported or deleted on its own.
 
 ---
 
 ## 3. Lyrics ingestion — import → tokenize → normalize → index
+
+Songs are imported whole, not fragment by fragment. The request carries the song plus its full list
+of lyric lines; we store that immediately and then derive everything else in the background.
 
 ```mermaid
 sequenceDiagram
@@ -232,39 +240,40 @@ sequenceDiagram
 
 **Steps:**
 
-1. **Import (sync, fast):** validate and store `Song` + `LyricLine[]` as-is, bump `revision`. Return
-   `202 Accepted` immediately — the user-facing catalog write is tiny and transactional.
-2. **Tokenize (async):** split each line into tokens, preserving `wordPosition` and `charStart/charEnd`
-   for tap-to-highlight. Punctuation/casing handled by a shared normalizer.
-3. **Normalize / lemmatize (async):** map surface forms to a lemma (e.g. `"done" → "do"`,
-   `"loving" → "love"`) via a 3rd-party NLP service. This is the `normalizedWord`, the unit users
-   actually learn. (Lemmatization is language-specific → see §8 scaling.)
-4. **Index (async):** **replace** the song's `WordOccurrence[]` (delete-by-`songId` + insert) so
-   re-imports are idempotent. Recompute `WordInsight` aggregates: increment `frequency`, merge
+1. **Import (sync, fast):** validate and store `Song` + `LyricLine[]` as-is, bump `revision`, and
+   return `202 Accepted` right away. This write is small and self-contained.
+2. **Tokenize (async):** split each line into tokens, keeping `wordPosition` and `charStart/charEnd`
+   so the UI can highlight the exact word. Casing and punctuation go through a shared normalizer.
+3. **Normalize / lemmatize (async):** reduce each surface form to its base form (e.g. `"done" → "do"`,
+   `"loving" → "love"`) using a 3rd-party NLP service. That base form is the `normalizedWord`, which
+   is the unit the user actually learns. (Lemmatization depends on the language — see §9.)
+4. **Index (async):** *replace* the song's `WordOccurrence[]` (delete by `songId`, then insert) so a
+   re-import never duplicates. Then recompute the `WordInsight` aggregates: bump `frequency`, merge
    `songRefs`.
-5. **Translation backfill (async):** detect `(insight, language)` gaps and enqueue machine translation.
+5. **Translation backfill (async):** find `(insight, language)` pairs that are missing a translation
+   and queue them for machine translation.
 
-**Update strategy:** edits to lyrics bump `revision` and re-run steps 2–5 for that song only. Because
-every derived write is keyed by `songId`/`(normalizedWord, language)` and is a `replace`/`upsert`, the
-pipeline is safe to retry and re-run — no duplicates, no drift.
+**Updating a song:** an edit bumps `revision` and re-runs steps 2–5 for that one song. Because every
+derived write is keyed by `songId` or `(normalizedWord, language)` and is a replace/upsert, the whole
+pipeline is safe to retry and re-run without creating duplicates or drift.
 
-**Query strategy:** word search and occurrence lookups hit `WordOccurrence` indexes directly (see §7),
-never the raw lyric text.
+**Querying:** word search and occurrence lookups go straight to the `WordOccurrence` indexes (§7),
+never to the raw lyric text.
 
 ---
 
 ## 4. Translations — representation & resolution
 
-Translations exist at **two levels**, both stored *out-of-line* from the source so a line/word can
-have any number of target languages:
+Translations live at two levels, both stored outside the original text so a line or word can have any
+number of target languages:
 
-- **Line-level** (`LineTranslation`): `(songId, lineIndex, language) → text`. Powers "show me the whole
+- **Line-level** (`LineTranslation`): `(songId, lineIndex, language) → text`. For "show me this whole
   line in Spanish."
-- **Word-level** (`WordInsightTranslation`, embedded in `WordInsight.translations[]`):
-  `(normalizedWord, language) → text`. Powers tap-a-word and all Part 2 exercises.
+- **Word-level** (`WordInsight.translations[]`): `(normalizedWord, language) → text`. For tapping a
+  word, and for all the Part 2 exercises.
 
-Each translation carries **`provenance`** (`human` | `machine` | `community`) and `confidence`, so the
-UI can label machine output and humans can override it later.
+Each translation also records where it came from (`provenance`: `human` | `machine` | `community`)
+and a `confidence`, so the UI can label machine output and a human can override it later.
 
 ### Resolution & fallback (when the user's language is missing)
 
@@ -279,8 +288,8 @@ flowchart TD
     F -- no --> H[Return explicit missing marker]
 ```
 
-**Missing translations are represented explicitly**, never as `null` text masquerading as a real
-translation:
+A missing translation is represented explicitly. We never return `null` text dressed up as if it were
+a real translation:
 
 ```jsonc
 { "language": "fr", "status": "missing", "text": null, "fallbackUsed": null }
@@ -288,27 +297,30 @@ translation:
 { "language": "es", "status": "available", "text": "cariño", "provenance": "human" }
 ```
 
-This lets clients render a clear "translation not available yet" state and optionally trigger
-on-demand generation, instead of silently showing blanks.
+This way the client can show a clear "translation not available yet" state, and optionally ask the
+system to generate one, instead of silently rendering a blank.
 
 ---
 
 ## 5. Core operations — synchronous vs. asynchronous
 
-| Operation | Mode | Rationale |
-|---|---|---|
-| Display lyrics in order | **Sync** | Single indexed range read on `LyricLine`. |
-| Word occurrence query | **Sync** | Indexed read on `WordOccurrence`. |
-| Line/word translation lookup | **Sync** | Indexed read; may *trigger* async MT on miss. |
-| Song insights for a user | **Sync** | Read insights + user vocab, compute difficulty on the fly (cacheable). |
-| Update user vocabulary state | **Sync** | Single-row upsert; the hot user write path. |
-| Lyrics import | **Sync write, async derive** | Store source fast (202), build projections in background. |
-| Tokenize / normalize / index | **Async** | CPU-heavy, 3rd-party calls, retryable. |
-| Insight aggregation | **Async** | Batch, idempotent, eventually consistent. |
-| Translation generation | **Async** | External MT latency; backfilled. |
+The deciding question is simple: **is a user waiting on the result right now?** If yes, it has to be
+synchronous and fast, so it should be a small indexed read or a single-row write. If the work is
+heavy, depends on an external service, or can be safely redone later, it goes async so the request
+never blocks on it. The table below applies that rule, and the rationale column gives the short
+reason for each.
 
-**Rule of thumb:** anything a user blocks on (reads, single-row writes) is synchronous; anything
-derivable, batchy, or dependent on a 3rd party is asynchronous and idempotent.
+| Operation | Mode | Why |
+|---|---|---|
+| Display lyrics in order | **Sync** | User is waiting; it's one indexed read on `LyricLine`. |
+| Word occurrence query | **Sync** | User is waiting; indexed read on `WordOccurrence`. |
+| Line/word translation lookup | **Sync** | User is waiting; indexed read. A miss only *triggers* async work, it doesn't block. |
+| Song insights for a user | **Sync** | User is waiting; read insights + vocab and compute the score in memory (and cache it). |
+| Update user vocabulary state | **Sync** | User is waiting; it's a single-row upsert, very cheap. |
+| Lyrics import | **Sync write, async derive** | Store the source quickly (202), then build the projections in the background. |
+| Tokenize / normalize / index | **Async** | CPU-heavy and calls a 3rd party; nobody is waiting and it can be retried. |
+| Insight aggregation | **Async** | Batch work that's fine to be eventually consistent. |
+| Translation generation | **Async** | External service with real latency; backfilled, not blocking. |
 
 ### Word occurrence query — example
 
@@ -343,14 +355,14 @@ derivable, batchy, or dependent on a 3rd party is asynchronous and idempotent.
 }
 ```
 
-**Difficulty model.** Baseline (acceptable per the brief):
+**Difficulty model.** The baseline the brief accepts:
 
 ```
 difficultyScore = unknownUniqueWords / totalUniqueWords
 ```
 
-Richer, still explainable & testable — weight each unknown/learning word by intrinsic difficulty and
-inverse frequency (rarer words are harder), normalized to `[0,1]`:
+A richer version that's still simple to explain and test: weight each unknown or learning word by its
+own difficulty (rarer, harder words count for more), and normalize to `[0,1]`:
 
 ```
 weight(w)   = difficulty(w) * (learningCounts ? 0.5 : 1)      // learning words count half
@@ -359,23 +371,25 @@ score       = Σ weight(w) for unknown/learning unique words
               Σ difficulty(w) for all unique words
 ```
 
-Both are pure functions of (insights, user vocab) → trivial to unit test, and the model is a single
-swappable function.
+Either way it's a pure function of (insights, user vocab), so it's easy to unit test and the formula
+is a single function you can swap out.
 
 ---
 
 ## 6. Optimization strategies & patterns
 
-- **CQRS-style read models.** `WordOccurrence` and `WordInsight` are denormalized projections built for
-  the exact queries the app makes. Reads never touch raw lyrics.
+- **Read models shaped for the query.** `WordOccurrence` and `WordInsight` are pre-built for the exact
+  queries the app runs (this is essentially CQRS), so reads never have to parse raw lyrics.
 - **Idempotent upserts keyed by natural keys** (`songId`, `(normalizedWord, language)`,
-  `(userId, wordInsightId)`) → safe retries, no duplicates, easy re-derivation.
-- **Compute-on-read + cache** for per-user difficulty/insights (a pure function), invalidated on user
-  vocab change. Avoids storing a value that goes stale on every catalog edit.
-- **Pagination & projections everywhere** (cursor-based on stable sort keys) to bound payloads.
-- **Pre-aggregated `frequency` / `songRefs`** on insights so "high-frequency words" is a sorted read,
-  not a catalog-wide scan.
-- **Outbox / queue for async steps** so ingestion survives worker restarts and 3rd-party outages.
+  `(userId, wordInsightId)`), which makes retries safe and re-derivation trivial.
+- **Compute-on-read plus cache** for the per-user difficulty/insights. It's a pure function, so we
+  cache the result and just invalidate it when the user's vocabulary changes, instead of storing a
+  value that goes stale every time the catalog is edited.
+- **Pagination and field projections everywhere** to keep payloads bounded.
+- **Pre-computed `frequency` and `songRefs`** on each insight, so "high-frequency words" is a sorted
+  read instead of a scan over the whole catalog.
+- **A queue (with an outbox) for the async steps**, so ingestion survives worker restarts and
+  third-party outages.
 
 ---
 
@@ -397,34 +411,35 @@ swappable function.
 
 ## 8. Error handling & invalid input (high level)
 
-- **Validate at the boundary.** Reject malformed import DTOs with a structured 422 (which field, which
-  line). Source data is never partially persisted in a broken state.
-- **Partial-success reporting for batch imports.** Return a summary
-  `{ created, updated, skipped, rejected[] }` rather than failing the whole batch — one bad line
-  shouldn't drop a whole song/dataset. (This is exactly the Part 2 import contract.)
-- **Async failures → retries + dead-letter queue.** Tokenization/translation failures are retried with
-  backoff; permanent failures land in a DLQ with the offending payload for inspection, while the rest of
-  the song proceeds.
-- **Explicit "missing" over silent null.** Missing translations/insights are first-class states (§4),
-  not error conditions — the app degrades gracefully.
-- **Idempotency keys** on ingest so client retries don't double-import.
+- **Validate at the edge.** Malformed import payloads are rejected with a structured 422 that points
+  at the field and the line. Source data is never half-written in a broken state.
+- **Report partial success on batch imports.** Return a summary
+  `{ created, updated, skipped, rejected[] }` instead of failing the whole batch, so one bad line
+  doesn't sink a whole song or dataset. (This is the exact contract the Part 2 import uses.)
+- **Retry async failures, then dead-letter them.** Tokenization or translation failures are retried
+  with backoff; if they keep failing they go to a dead-letter queue with the payload for inspection,
+  while the rest of the song keeps going.
+- **Prefer an explicit "missing" over a silent null** (§4), so a gap is a normal state the app can
+  handle, not an error.
+- **Idempotency keys on ingest**, so a client retry doesn't import the same song twice.
 
 ---
 
 ## 9. Scaling — more songs, users, languages
 
-- **More songs (catalog growth):** the catalog is read-heavy and immutable → scale with read replicas
-  and a CDN/cache in front of insights. `word_occurrences` is the largest collection; shard by `songId`
-  (co-locates a song's words, keeps occurrence queries single-shard).
-- **More users (write growth):** `user_vocabulary` and `exercise_attempts` are the write-hot
-  collections → shard by `userId` so a user's reads/writes stay on one shard and user load spreads
-  evenly. This is decoupled from the catalog entirely.
-- **More languages:** translations are additive `(entity, language)` rows, so a new language is a
-  backfill job, not a schema change. Lemmatization/NLP is language-specific → the ingest pipeline
-  selects a per-language analyzer; partition translation-generation workers by language so one slow
-  language can't starve others.
-- **Insight generation throughput:** the pipeline is horizontally scalable (stateless workers off a
-  queue, idempotent steps), so import throughput scales by adding workers.
+- **More songs (catalog growth):** the catalog is read-heavy and rarely changes, so it scales well
+  with read replicas and a cache/CDN in front of the insights. `word_occurrences` is the biggest
+  collection; sharding it by `songId` keeps each song's words together and keeps occurrence queries on
+  a single shard.
+- **More users (write growth):** `user_vocabulary` and `exercise_attempts` are the write-heavy
+  collections, so we shard them by `userId`. A user's reads and writes stay on one shard and the load
+  spreads evenly, completely separate from the catalog.
+- **More languages:** translations are just additive `(entity, language)` rows, so adding a language
+  is a backfill job, not a schema change. The NLP/lemmatizer is language-specific, so the pipeline
+  picks the right analyzer per language and we partition the translation workers by language so one
+  slow language doesn't hold up the rest.
+- **Insight generation throughput:** the workers are stateless and the steps are idempotent, so we
+  scale import throughput just by adding more workers.
 
 ---
 
@@ -442,12 +457,11 @@ swappable function.
 
 ## 11. How Part 1 connects to Part 2
 
-Part 2 implements the **practice layer** on top of the two entities defined here that don't require
-lyric processing:
+Part 2 is the practice layer, built on the two entities here that don't need any lyric processing:
 
-- **`WordInsight`** — imported/seeded directly (§2.3), with lightweight `songRefs` so no lyrics are
+- **`WordInsight`** — imported or seeded directly (§2.3), with light `songRefs` so no lyrics are
   needed.
-- **`UserVocabulary`** — the per-user state (§2.4), updated directly or via exercise attempts.
+- **`UserVocabulary`** — the per-user state (§2.4), updated directly or through exercise attempts.
 
-Everything upstream (lyrics, occurrences, line translations, the ingestion pipeline) is the
-"insight-generation process" that Part 2 assumes has already run.
+Everything upstream of those (lyrics, occurrences, line translations, the ingestion pipeline) is the
+"insight generation process" that Part 2 simply assumes has already run.
