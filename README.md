@@ -3,13 +3,17 @@
 This is my solution to the Singit backend challenge: the backend for an app that helps people learn
 English through music. The challenge has two parts, and this repo contains both.
 
-- **Part 1 — Architecture (writing only):** [`docs/PART1-ARCHITECTURE.md`](docs/PART1-ARCHITECTURE.md).
+- **Part 1 — Architecture (writing only):** [`docs/Part1_Architecture.md`](docs/Part1_Architecture.md)
+  (also as [PDF](docs/Part1_Architecture.pdf)).
   How I'd design the *full* system — songs with synced lyrics, splitting lyrics into searchable words,
   translations, building the word "insights", user vocabulary, and difficulty scoring — with diagrams
   and the trade-offs behind each choice.
 - **Part 2 — The code (this repo):** the **practice layer** that sits on top of those word insights.
   It assumes the insights already exist (so there's no lyrics parsing here) and focuses on helping a
-  user actually practice and learn words. Built with **NestJS, TypeScript, Mongoose and MongoDB**.
+  user actually practice and learn words. The **API** is built with **NestJS, TypeScript, Mongoose and
+  MongoDB**, and there's a small **Next.js web app** on top of it so you can click through the whole
+  thing. It's a **pnpm workspace** with two packages: [`server/`](server) (the API) and
+  [`web/`](web) (the UI).
 
 ### The idea in one paragraph
 
@@ -25,34 +29,53 @@ user knows** based on how they did.
 
 ## Running it
 
-### Option A — everything in Docker (app + MongoDB)
+You need **Node 22**, **pnpm**, and **Docker** (just for MongoDB). Install once from the repo root:
 
 ```bash
-docker compose up --build        # MongoDB + the API on http://localhost:3000
-# then, in another terminal, load the example data:
-docker compose exec app npm run seed
+pnpm install
 ```
 
-### Option B — Node locally, Docker just for MongoDB
+### The quick way — start everything
 
 ```bash
-cp .env.example .env
-docker compose up -d mongo       # only MongoDB, on :27017
-npm install
-npm run seed                     # load the example data
-npm run start:dev                # API on :3000 (auto-reload)
+pnpm dev        # starts MongoDB (Docker) + the API (:3000) + the web app (:3001)
+pnpm seed       # in another terminal, load the example data (run once)
 ```
 
-Once it's up, the easiest way to play with it is **Swagger at <http://localhost:3000/docs>** — every
-endpoint is documented and you can call it right there. There's also a Postman collection at
-[`postman/Singit.postman_collection.json`](postman/Singit.postman_collection.json) if you prefer that
-(it auto-fills the session and exercise ids for you after you create a session).
+Then open:
+
+- **Web app → <http://localhost:3001>** (the nice way to use it)
+- **Swagger → <http://localhost:3000/docs>** (every endpoint, callable in the browser)
+
+### Start just one side
+
+`pnpm dev` runs both apps together; these run them on their own:
+
+```bash
+pnpm dev:db       # only MongoDB (Docker)
+pnpm dev:server   # only the API   (:3000)  — needs MongoDB running
+pnpm dev:web      # only the web app (:3001) — needs the API running
+```
+
+### Everything in Docker (optional)
+
+The API also has a Dockerfile, so you can run the API + MongoDB fully containerised (the web app you'd
+still run with `pnpm dev:web`):
+
+```bash
+docker compose up --build              # MongoDB + the API on :3000
+docker compose exec app pnpm seed      # load the example data
+```
+
+There's also a Postman collection at
+[`postman/Singit.postman_collection.json`](postman/Singit.postman_collection.json) (it auto-fills the
+session and exercise ids for you after you create a session).
 
 ### Tests
 
 ```bash
-npm test            # unit tests: prioritization, exercise generation, the attempt rule
-npm run test:e2e    # full flow over HTTP against a real (in-memory) MongoDB
+pnpm test           # unit tests: prioritization, exercise generation, the attempt rule
+pnpm test:e2e       # full flow over HTTP against a real (in-memory) MongoDB
 ```
 
 The e2e suite spins up a real MongoDB in memory (via `mongodb-memory-server`), so it exercises the
@@ -85,11 +108,24 @@ bottom of this section.
 
 ## How the code is organized
 
+The repo is a pnpm workspace with two packages:
+
+```
+.
+  server/            the NestJS API
+  web/               the Next.js web app
+  docs/              Part 1 architecture (markdown + PDF)
+  postman/           Postman collection
+  docker-compose.yml MongoDB (+ optional API) for local dev
+```
+
+### The API (`server/`)
+
 Three feature modules, each owning its own collection. The split mirrors the three different kinds of
 data: the **shared catalog**, the **per-user state**, and the **practice activity**.
 
 ```
-src/
+server/src/
   common/            shared bits: enums, pagination, error handling, the normalize + seeded-random helpers
   config/            reads PORT and the Mongo URI from the environment
   database/          the Mongoose connection
@@ -99,6 +135,23 @@ src/
     practice/        sessions, exercise generation, attempts, and results
   seed/              the example dataset + a script to load it
 ```
+
+### The web app (`web/`)
+
+A small **Next.js (App Router) + TypeScript** UI, deliberately minimalist with green/blue tones. It
+talks to the API over REST (base URL in `NEXT_PUBLIC_API_URL`, default `http://localhost:3000`):
+
+```
+web/
+  app/page.tsx          dashboard — pick a user, see the summary + words ranked by priority
+  app/practice/page.tsx  practice flow — generate a session, answer exercises, see results
+  lib/api.ts             typed client for the API
+  components/, app/globals.css
+```
+
+Two screens: a **dashboard** (per-user summary cards + the word list ranked by priority, where you can
+change a word's status), and a **practice flow** (configure a session, answer the generated exercises
+one by one with instant feedback and the `learning → known` status change, then a results screen).
 
 ### The four collections
 
@@ -123,7 +176,7 @@ exactly why each one below lives in its own small, pure function.
 
 ### Which words to practice first (prioritization)
 
-Lives in `src/modules/user-vocabulary/prioritization.service.ts`. Each word gets a score between 0
+Lives in `server/src/modules/user-vocabulary/prioritization.service.ts`. Each word gets a score between 0
 and 1 — higher means "practice this sooner":
 
 ```
@@ -143,7 +196,7 @@ if it's a harder word, or if they just got it wrong. The details:
 
 ### Generating exercises
 
-Lives in `src/modules/practice/exercise-generator.service.ts`. Exercises are built from the stored
+Lives in `server/src/modules/practice/exercise-generator.service.ts`. Exercises are built from the stored
 insights — nothing is hardcoded. Three types:
 
 - `word_meaning` — pick the correct translation of a word.
@@ -200,7 +253,11 @@ The brief explicitly invites challenging the example DTOs, so here's what I chan
 
 ## Stack & assumptions
 
-- Node.js 22, NestJS 10, Mongoose 8, MongoDB 7.
-- No auth — it's out of scope, so the `userId` just comes from the route.
+- **API:** Node.js 22, NestJS 10, Mongoose 8, MongoDB 7. **Web:** Next.js 14 (App Router) + React 18.
+  Managed as a **pnpm workspace**.
+- No auth — it's out of scope, so the `userId` just comes from the route (and is a plain field in the
+  web app).
 - No real translation or NLP here — the insights arrive already built. That whole pipeline is what
   Part 1 describes.
+- The seed images use placeholder URLs; the web app falls back to a real placeholder image when one
+  doesn't load, so the image exercises still work in the demo.

@@ -1,30 +1,21 @@
 # Part 1 — Architecture Principles
 
-> Backend architecture for an English-learning-through-music product: songs with synchronized
-> lyrics, line and word translations, word-level learning insights, and per-user vocabulary state.
->
-> This is a written design, no implementation. I kept it aligned with Part 2 on purpose: the
-> `WordInsight` and `UserVocabulary` entities described here are the same ones I actually built in
-> Part 2.
-
----
-
 ## 1. Design goals & guiding principles
 
 The brief asks for a design that clearly separates five concerns. I used that separation as the
 backbone of the whole thing, because each one behaves differently: they are written at different
 times, owned by different parts of the system, and read in different ways.
 
-| Concern | What it optimizes for | Write frequency | Responsibility |
-|---|---|---|---|
-| Original lyric structure (display) | Faithful, ordered rendering with timings | Once, on import | Catalog |
-| Searchable word representation | Fast word/occurrence lookup | Rebuilt when lyrics change | Catalog (generated) |
-| Translation model (line + word) | Showing text in the user's language | Incremental, async | Catalog (generated) |
-| User vocabulary state | Tracking what each user knows | High, every interaction | User |
-| Insight generation | Turning words into learnable units | Batch, async | Pipeline |
+| Concern                            | What it optimizes for                    | Write frequency            | Owner             |
+| ---------------------------------- | ---------------------------------------- | -------------------------- | ----------------- |
+| Original lyric structure (display) | Faithful, ordered rendering with timings | Once, on import            | Catalog           |
+| Searchable word representation     | Fast word/occurrence lookup              | Rebuilt when lyrics change | Catalog (derived) |
+| Translation model (line + word)    | Showing text in the user's language      | Incremental, async         | Catalog (derived) |
+| User vocabulary state              | Tracking what each user knows            | High, every interaction    | User              |
+| Insight generation                 | Turning words into learnable units       | Batch, async               | Pipeline          |
 
-The main idea behind the design is to keep the *write model* (the original lyrics, stored exactly as
-imported) separate from the *read models* (the indexed, pre-shaped data we actually query). A song is
+The main idea behind the design is to keep the _write model_ (the original lyrics, stored exactly as
+imported) separate from the _read models_ (the indexed, pre-shaped data we actually query). A song is
 imported once but read constantly, so it pays off to do the heavy work at import time and keep reads
 simple.
 
@@ -106,7 +97,7 @@ erDiagram
     }
 ```
 
-### 2.1 Original lyric structure — *display* (`Song`, `Artist`, `LyricLine`)
+### 2.1 Original lyric structure — _display_ (`Song`, `Artist`, `LyricLine`)
 
 This is the source of truth. We store it exactly as it arrives and never throw anything away.
 `LyricLine` keeps the order (`lineIndex`), the original `text`, and optional
@@ -120,7 +111,7 @@ This is the source of truth. We store it exactly as it arrives and never throw a
   "lineIndex": 0,
   "startTimeMs": 1200,
   "endTimeMs": 4200,
-  "text": "I found a love for me"
+  "text": "I found a love for me",
 }
 ```
 
@@ -134,9 +125,9 @@ What I keep, change or enrich compared to the example DTO:
 - **Enrich:** add some `metadata` (album, release year, ISRC) and a `revision` counter on the song,
   so the derived data knows when it needs to be rebuilt.
 
-### 2.2 Searchable word representation — *queries* (`WordOccurrence`)
+### 2.2 Searchable word representation — _queries_ (`WordOccurrence`)
 
-Plain text is awkward to query: there's no clean way to ask "where does *love* appear?" against a
+Plain text is awkward to query: there's no clean way to ask "where does _love_ appear?" against a
 string. So when a song is imported we split each line into words and store one `WordOccurrence` per
 word position. This is the index behind word search, occurrence lookups and frequency counts.
 
@@ -145,12 +136,12 @@ word position. This is the index behind word search, occurrence lookups and freq
 {
   "songId": "song_001",
   "lineIndex": 0,
-  "wordPosition": 3,            // 0-based position within the line
-  "rawToken": "love",          // exactly as it appears
-  "normalizedWord": "love",    // lemma — links to WordInsight
-  "charStart": 11,              // offset into LyricLine.text (for tap-to-highlight)
+  "wordPosition": 3, // 0-based position within the line
+  "rawToken": "love", // exactly as it appears
+  "normalizedWord": "love", // lemma — links to WordInsight
+  "charStart": 11, // offset into LyricLine.text (for tap-to-highlight)
   "charEnd": 15,
-  "startTimeMs": 1200           // inherited/interpolated from the line
+  "startTimeMs": 1200, // inherited/interpolated from the line
 }
 ```
 
@@ -158,7 +149,7 @@ The pair `(normalizedWord, language)` is the link to `WordInsight`. We intention
 translations or difficulty here. Those live on the shared insight, so editing one insight is
 reflected in every occurrence automatically.
 
-### 2.3 Global word insights — *learning units* (`WordInsight`)
+### 2.3 Global word insights — _learning units_ (`WordInsight`)
 
 Built once per `(normalizedWord, language)` across the whole catalog. This is the entity Part 2 is
 built on. It carries everything you need to learn or practice a word: translations, difficulty,
@@ -170,20 +161,38 @@ frequency, example sentences, and light references back to the songs and images 
   "word": "darling",
   "normalizedWord": "darling",
   "language": "en",
-  "translations": [ { "language": "es", "text": "cariño" }, { "language": "pt", "text": "querido" } ],
-  "difficulty": 2,             // 1..5 intrinsic difficulty
-  "frequency": 12,             // occurrences across the catalog
+  "translations": [
+    { "language": "es", "text": "cariño" },
+    { "language": "pt", "text": "querido" },
+  ],
+  "difficulty": 2, // 1..5 intrinsic difficulty
+  "frequency": 12, // occurrences across the catalog
   "source": "song",
-  "songRefs": [ { "songId": "song_001", "title": "Example Song", "occurrences": 1 } ],
-  "imageRefs": [ { "id": "image_darling_001", "url": "https://.../darling.png", "alt": "..." } ],
-  "examples": [ { "text": "Darling, just dive right in", "translations": [ { "language": "es", "text": "Cariño, simplemente lánzate" } ] } ]
+  "songRefs": [
+    { "songId": "song_001", "title": "Example Song", "occurrences": 1 },
+  ],
+  "imageRefs": [
+    {
+      "id": "image_darling_001",
+      "url": "https://.../darling.png",
+      "alt": "...",
+    },
+  ],
+  "examples": [
+    {
+      "text": "Darling, just dive right in",
+      "translations": [
+        { "language": "es", "text": "Cariño, simplemente lánzate" },
+      ],
+    },
+  ],
 }
 ```
 
 `songRefs` are kept light on purpose (just id, title and a count), so the practice layer never has to
 touch full lyrics. That's exactly what lets Part 2 stand on its own.
 
-### 2.4 User vocabulary state — *per-user* (`UserVocabulary`)
+### 2.4 User vocabulary state — _per-user_ (`UserVocabulary`)
 
 Stored separately from the catalog, one row per `(userId, wordInsightId)`. It answers "does this user
 already know this word?" and keeps the practice stats.
@@ -194,10 +203,10 @@ already know this word?" and keeps the practice stats.
   "wordInsightId": "insight_002",
   "normalizedWord": "love",
   "language": "en",
-  "status": "known",          // unknown | learning | known | ignored
+  "status": "known", // unknown | learning | known | ignored
   "correctCount": 3,
   "incorrectCount": 1,
-  "lastPracticedAt": "2026-06-13T10:00:00Z"
+  "lastPracticedAt": "2026-06-13T10:00:00Z",
 }
 ```
 
@@ -247,7 +256,7 @@ sequenceDiagram
 3. **Normalize / lemmatize (async):** reduce each surface form to its base form (e.g. `"done" → "do"`,
    `"loving" → "love"`) using a 3rd-party NLP service. That base form is the `normalizedWord`, which
    is the unit the user actually learns. (Lemmatization depends on the language — see §9.)
-4. **Index (async):** *replace* the song's `WordOccurrence[]` (delete by `songId`, then insert) so a
+4. **Index (async):** _replace_ the song's `WordOccurrence[]` (delete by `songId`, then insert) so a
    re-import never duplicates. Then recompute the `WordInsight` aggregates: bump `frequency`, merge
    `songRefs`.
 5. **Translation backfill (async):** find `(insight, language)` pairs that are missing a translation
@@ -310,17 +319,17 @@ heavy, depends on an external service, or can be safely redone later, it goes as
 never blocks on it. The table below applies that rule, and the rationale column gives the short
 reason for each.
 
-| Operation | Mode | Why |
-|---|---|---|
-| Display lyrics in order | **Sync** | User is waiting; it's one indexed read on `LyricLine`. |
-| Word occurrence query | **Sync** | User is waiting; indexed read on `WordOccurrence`. |
-| Line/word translation lookup | **Sync** | User is waiting; indexed read. A miss only *triggers* async work, it doesn't block. |
-| Song insights for a user | **Sync** | User is waiting; read insights + vocab and compute the score in memory (and cache it). |
-| Update user vocabulary state | **Sync** | User is waiting; it's a single-row upsert, very cheap. |
-| Lyrics import | **Sync write, async derive** | Store the source quickly (202), then build the projections in the background. |
-| Tokenize / normalize / index | **Async** | CPU-heavy and calls a 3rd party; nobody is waiting and it can be retried. |
-| Insight aggregation | **Async** | Batch work that's fine to be eventually consistent. |
-| Translation generation | **Async** | External service with real latency; backfilled, not blocking. |
+| Operation                    | Mode                         | Why                                                                                    |
+| ---------------------------- | ---------------------------- | -------------------------------------------------------------------------------------- |
+| Display lyrics in order      | **Sync**                     | User is waiting; it's one indexed read on `LyricLine`.                                 |
+| Word occurrence query        | **Sync**                     | User is waiting; indexed read on `WordOccurrence`.                                     |
+| Line/word translation lookup | **Sync**                     | User is waiting; indexed read. A miss only*triggers* async work, it doesn't block.     |
+| Song insights for a user     | **Sync**                     | User is waiting; read insights + vocab and compute the score in memory (and cache it). |
+| Update user vocabulary state | **Sync**                     | User is waiting; it's a single-row upsert, very cheap.                                 |
+| Lyrics import                | **Sync write, async derive** | Store the source quickly (202), then build the projections in the background.          |
+| Tokenize / normalize / index | **Async**                    | CPU-heavy and calls a 3rd party; nobody is waiting and it can be retried.              |
+| Insight aggregation          | **Async**                    | Batch work that's fine to be eventually consistent.                                    |
+| Translation generation       | **Async**                    | External service with real latency; backfilled, not blocking.                          |
 
 ### Word occurrence query — example
 
@@ -335,8 +344,8 @@ reason for each.
     "originalLineText": "I found a love for me",
     "rawToken": "love",
     "startTimeMs": 1200,
-    "endTimeMs": 4200
-  }
+    "endTimeMs": 4200,
+  },
 ]
 ```
 
@@ -349,9 +358,9 @@ reason for each.
   "userId": "user_001",
   "totalWords": 7,
   "uniqueWords": 6,
-  "repeatedWords": [ { "normalizedWord": "love", "count": 2 } ],
+  "repeatedWords": [{ "normalizedWord": "love", "count": 2 }],
   "byStatus": { "known": 3, "learning": 1, "unknown": 2, "ignored": 0 },
-  "difficultyScore": 0.33
+  "difficultyScore": 0.33,
 }
 ```
 
@@ -395,17 +404,17 @@ is a single function you can swap out.
 
 ## 7. Indexing strategy
 
-| Collection | Index | Serves |
-|---|---|---|
-| `lyric_lines` | `(songId, lineIndex)` unique | ordered display, line lookup |
-| `word_occurrences` | `(songId, normalizedWord)` | word occurrences in a song |
-| `word_occurrences` | `(normalizedWord)` | cross-song search, frequency |
-| `word_occurrences` | `(songId, lineIndex, wordPosition)` unique | tap-a-word resolution |
-| `word_insights` | `(normalizedWord, language)` unique | join key, upsert key |
-| `word_insights` | `(language, source, difficulty)` | catalog filtering |
-| `line_translations` | `(songId, lineIndex, language)` unique | line translation resolution |
-| `user_vocabulary` | `(userId, wordInsightId)` unique | user state lookup/upsert |
-| `user_vocabulary` | `(userId, status)` | summary counts |
+| Collection          | Index                                      | Serves                       |
+| ------------------- | ------------------------------------------ | ---------------------------- |
+| `lyric_lines`       | `(songId, lineIndex)` unique               | ordered display, line lookup |
+| `word_occurrences`  | `(songId, normalizedWord)`                 | word occurrences in a song   |
+| `word_occurrences`  | `(normalizedWord)`                         | cross-song search, frequency |
+| `word_occurrences`  | `(songId, lineIndex, wordPosition)` unique | tap-a-word resolution        |
+| `word_insights`     | `(normalizedWord, language)` unique        | join key, upsert key         |
+| `word_insights`     | `(language, source, difficulty)`           | catalog filtering            |
+| `line_translations` | `(songId, lineIndex, language)` unique     | line translation resolution  |
+| `user_vocabulary`   | `(userId, wordInsightId)` unique           | user state lookup/upsert     |
+| `user_vocabulary`   | `(userId, status)`                         | summary counts               |
 
 ---
 
@@ -445,13 +454,13 @@ is a single function you can swap out.
 
 ## 10. Third-party service assumptions
 
-| Service | Used for | Assumption |
-|---|---|---|
-| NLP / lemmatizer (e.g. spaCy/Stanza service) | tokenization + normalization (`normalizedWord`) | per-language model available; called async, batchable. |
-| Machine translation (e.g. DeepL/Google) | filling missing line/word translations | async, rate-limited; output flagged `provenance="machine"`. |
-| Object storage + CDN (e.g. S3 + CloudFront) | `imageRefs` for image exercises, cached lyrics/insights | URLs are stable & public-readable. |
-| Message queue (e.g. SQS/RabbitMQ/Kafka) | ingest & translation pipeline | at-least-once delivery → all consumers idempotent. |
-| (Optional) Cache (e.g. Redis) | per-user difficulty, hot insights | invalidated on user-vocab / catalog change. |
+| Service                                      | Used for                                                | Assumption                                                  |
+| -------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------- |
+| NLP / lemmatizer (e.g. spaCy/Stanza service) | tokenization + normalization (`normalizedWord`)         | per-language model available; called async, batchable.      |
+| Machine translation (e.g. DeepL/Google)      | filling missing line/word translations                  | async, rate-limited; output flagged `provenance="machine"`. |
+| Object storage + CDN (e.g. S3 + CloudFront)  | `imageRefs` for image exercises, cached lyrics/insights | URLs are stable & public-readable.                          |
+| Message queue (e.g. SQS/RabbitMQ/Kafka)      | ingest & translation pipeline                           | at-least-once delivery → all consumers idempotent.          |
+| (Optional) Cache (e.g. Redis)                | per-user difficulty, hot insights                       | invalidated on user-vocab / catalog change.                 |
 
 ---
 
