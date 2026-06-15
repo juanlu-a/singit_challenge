@@ -8,6 +8,9 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Allow the web app (served on a different port) to call the API from the browser.
+  app.enableCors({ origin: true });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
